@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Caméra</title>
+<style>
+  :root { --bg:#0b0b0c; --fg:#f5f5f5; --muted:#9a9aa0; --accent:#ffd60a; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  .app { display:flex; flex-direction:column; height:100%;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  .top { display:flex; justify-content:space-between; align-items:center; padding:12px 16px; gap:8px; }
+  .chip { background:#1c1c1f; color:var(--fg); border:0; border-radius:999px; padding:8px 14px;
+    font-size:14px; font-weight:600; cursor:pointer; white-space:nowrap; }
+  .chip.on { background:var(--accent); color:#000; }
+  .stage { position:relative; flex:1; margin:0 12px; border-radius:22px; overflow:hidden; background:#000; }
+  #view { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+  .mirror { transform:scaleX(-1); }
+  video { display:none; }
+  .placeholder { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    text-align:center; color:var(--muted); padding:24px; line-height:1.5; }
+  .placeholder b { color:var(--fg); font-size:18px; margin-bottom:6px; }
+  .count { position:absolute; inset:0; display:none; align-items:center; justify-content:center;
+    font-size:120px; font-weight:800; text-shadow:0 4px 30px rgba(0,0,0,.6); }
+  .flash { position:fixed; inset:0; background:#fff; opacity:0; pointer-events:none; transition:opacity .35s; z-index:10; }
+  .filters { display:flex; gap:8px; overflow-x:auto; padding:12px 16px 4px; scrollbar-width:none; }
+  .filters::-webkit-scrollbar { display:none; }
+  .bottom { display:flex; align-items:center; justify-content:space-between; padding:14px 28px 20px; }
+  .thumb { width:52px; height:52px; border-radius:12px; background:#1c1c1f center/cover no-repeat;
+    border:2px solid #2a2a2e; cursor:pointer; }
+  .shutter { width:78px; height:78px; border-radius:50%; border:5px solid #fff; background:transparent; padding:5px; cursor:pointer; }
+  .shutter span { display:block; width:100%; height:100%; border-radius:50%; background:#fff; transition:transform .1s; }
+  .shutter:active span { transform:scale(.88); }
+  .side { width:52px; height:52px; border-radius:50%; background:#1c1c1f; border:0; color:var(--fg); font-size:22px; cursor:pointer; }
+  .sheet { position:fixed; inset:0; background:rgba(0,0,0,.94); display:none; flex-direction:column; z-index:20;
+    padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  .sheet.open { display:flex; }
+  .sheet header { display:flex; justify-content:space-between; align-items:center; padding:14px 16px; }
+  .viewer { flex:1; display:flex; align-items:center; justify-content:center; padding:0 12px; min-height:0; }
+  .viewer img { max-width:100%; max-height:100%; border-radius:16px; }
+  .strip { display:flex; gap:8px; overflow-x:auto; padding:12px 16px; }
+  .strip img { width:56px; height:56px; object-fit:cover; border-radius:10px; opacity:.55; cursor:pointer; flex:none; }
+  .strip img.sel { opacity:1; outline:2px solid var(--accent); }
+  .actions { display:flex; gap:10px; justify-content:center; padding:4px 16px 8px; }
+  .msg { text-align:center; color:var(--muted); font-size:13px; min-height:18px; padding:0 16px 8px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="top">
+    <button class="chip on" id="btnMirror">Miroir</button>
+    <button class="chip" id="btnTimer">⏱ Off</button>
+    <button class="chip" id="btnLight">💡 Flash</button>
+  </div>
+
+  <div class="stage" id="stage">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="view" class="mirror"></canvas>
+    <div class="placeholder" id="placeholder"><b>Caméra</b>Démarrage de la caméra…</div>
+    <div class="count" id="count"></div>
+  </div>
+
+  <div class="filters" id="filters"></div>
+
+  <div class="bottom">
+    <div class="thumb" id="thumb" title="Galerie"></div>
+    <button class="shutter" id="shutter" aria-label="Prendre une photo"><span></span></button>
+    <button class="side" id="btnFlip" aria-label="Changer de caméra">⟲</button>
+  </div>
+</div>
+
+<div class="flash" id="flash"></div>
+
+<div class="sheet" id="sheet">
+  <header>
+    <button class="chip" id="closeSheet">✕ Fermer</button>
+    <span id="sheetCount" style="color:var(--muted);font-size:14px"></span>
+  </header>
+  <div class="viewer"><img id="bigImg" alt=""></div>
+  <div class="strip" id="strip"></div>
+  <div class="actions">
+    <button class="chip on" id="btnSave">⬇ Enregistrer</button>
+    <button class="chip" id="btnDelete">🗑 Supprimer</button>
+  </div>
+  <div class="msg" id="msg"></div>
+</div>
+
+<script type="module">
+/* ===================== Réglages ===================== */
+const DELAI_AVANT_EFFET = 5 * 60 * 1000;   // 5 minutes
+const PAUSE_ENTRE_REGARDS = [6000, 15000]; // entre deux mouvements (ms)
+const DUREE_REGARD = [1200, 2600];         // temps où les yeux restent en haut (ms)
+const VITESSE_MOUVEMENT = 160;             // durée du déplacement aller / retour (ms)
+
+/* ===================== Interface ===================== */
+const $ = id => document.getElementById(id);
+const video = $('video'), view = $('view'), vctx = view.getContext('2d', { willReadFrequently: true });
+const FILTERS = [
+  ['Normal','none'], ['N&B','grayscale(1)'], ['Sépia','sepia(.8)'],
+  ['Chaud','saturate(1.3) sepia(.25) brightness(1.05)'], ['Froid','saturate(.9) hue-rotate(15deg) brightness(1.05)'],
+  ['Vif','saturate(1.7) contrast(1.1)'], ['Doux','brightness(1.12) contrast(.9) saturate(.9)'], ['Noir','grayscale(1) contrast(1.5)']
+];
+let filter = 'none', mirror = true, timer = 0, screenLight = false, facing = 'user', stream = null, live = false;
+
+FILTERS.forEach(([name, css], i) => {
+  const b = document.createElement('button');
+  b.className = 'chip' + (i === 0 ? ' on' : ''); b.textContent = name;
+  b.onclick = () => {
+    filter = css; view.style.filter = css;
+    document.querySelectorAll('#filters .chip').forEach(c => c.classList.remove('on')); b.classList.add('on');
+  };
+  $('filters').appendChild(b);
+});
+$('btnMirror').onclick = e => { mirror = !mirror; e.currentTarget.classList.toggle('on', mirror); view.classList.toggle('mirror', mirror); };
+$('btnTimer').onclick = e => {
+  timer = timer === 0 ? 3 : timer === 3 ? 10 : 0;
+  e.currentTarget.textContent = timer ? `⏱ ${timer}s` : '⏱ Off'; e.currentTarget.classList.toggle('on', !!timer);
+};
+$('btnLight').onclick = e => { screenLight = !screenLight; e.currentTarget.classList.toggle('on', screenLight); };
+$('btnFlip').onclick = () => {
+  facing = facing === 'user' ? 'environment' : 'user';
+  mirror = facing === 'user'; $('btnMirror').classList.toggle('on', mirror); view.classList.toggle('mirror', mirror);
+  startCamera();
+};
+
+/* ===================== Caméra ===================== */
+let startedAt = 0;
+async function startCamera() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    video.srcObject = stream; await video.play();
+    live = true; $('placeholder').style.display = 'none';
+    if (!startedAt) startedAt = performance.now();
+  } catch (e) {
+    live = false;
+    $('placeholder').innerHTML = '<b>Caméra indisponible</b>Autorise l’accès à la caméra, et ouvre cette page depuis une adresse en https.';
+  }
+}
+
+/* ===================== Détection du visage ===================== */
+startCamera();
+let landmarker = null;
+try {
+  const { FaceLandmarker, FilesetResolver } = await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs");
+  const fs = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  landmarker = await FaceLandmarker.createFromOptions(fs, {
+    baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task", delegate: "GPU" },
+    runningMode: "VIDEO", numFaces: 1 });
+} catch (e) { console.warn('Détection indisponible', e); }
+
+// Points du contour de chaque œil, centre de l'iris et anneau de l'iris (MediaPipe Face Mesh)
+const EYES = [
+  { contour: [33,246,161,160,159,158,157,173,133,155,154,153,145,144,163,7], center: 468, ring: [469,470,471,472] },
+  { contour: [263,466,388,387,386,385,384,398,362,382,381,380,374,373,390,249], center: 473, ring: [474,475,476,477] }
+];
+const scleraCache = [null, null];
+
+/* ===================== Faux mouvement des yeux ===================== */
+// Planification : rien avant 5 min, puis un regard en haut (gauche ou droite au hasard) de temps en temps.
+let glance = null, nextGlanceAt = Infinity;
+const rand = ([a, b]) => a + Math.random() * (b - a);
+function scheduleNext(now) { nextGlanceAt = now + rand(PAUSE_ENTRE_REGARDS); }
+function glanceAmount(now) {
+  if (!startedAt) return 0;
+  if (nextGlanceAt === Infinity && now - startedAt >= DELAI_AVANT_EFFET) nextGlanceAt = now;
+  if (!glance && now >= nextGlanceAt) {
+    glance = { t0: now, hold: rand(DUREE_REGARD), dir: Math.random() < .5 ? -1 : 1 };
+  }
+  if (!glance) return 0;
+  const t = now - glance.t0, v = VITESSE_MOUVEMENT, total = v * 2 + glance.hold;
+  if (t >= total) { glance = null; scheduleNext(now); return 0; }
+  const ease = x => x < .5 ? 2*x*x : 1 - Math.pow(-2*x + 2, 2) / 2;
+  return t < v ? ease(t / v) : t < v + glance.hold ? 1 : ease(1 - (t - v - glance.hold) / v);
+}
+// Test caché : touche 3 fois rapidement l'image pour déclencher l'effet tout de suite.
+let taps = [];
+$('stage').addEventListener('click', () => {
+  const n = performance.now(); taps = taps.filter(t => n - t < 700); taps.push(n);
+  if (taps.length >= 3) { taps = []; startedAt = n - DELAI_AVANT_EFFET; nextGlanceAt = n; }
+});
+
+function pointInPoly(x, y, P) {
+  let inside = false;
+  for (let i = 0, j = P.length - 1; i < P.length; j = i++) {
+    const [xi, yi] = P[i], [xj, yj] = P[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function sampleSclera(i, P, cx, cy, r) {
+  const xs = P.map(p => p[0]), ys = P.map(p => p[1]);
+  const x0 = Math.max(0, Math.floor(Math.min(...xs))), y0 = Math.max(0, Math.floor(Math.min(...ys)));
+  const w = Math.ceil(Math.max(...xs)) - x0, h = Math.ceil(Math.max(...ys)) - y0;
+  if (w < 4 || h < 2) return;
+  const d = vctx.getImageData(x0, y0, w, h).data, px = [];
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const X = x0 + x, Y = y0 + y;
+    if (Math.hypot(X - cx, Y - cy) < r * 1.15 || !pointInPoly(X, Y, P)) continue;
+    const k = (y * w + x) * 4; px.push([d[k], d[k+1], d[k+2], d[k] + d[k+1] + d[k+2]]);
+  }
+  if (px.length < 6) return;
+  px.sort((a, b) => b[3] - a[3]);
+  const top = px.slice(0, Math.max(3, Math.floor(px.length * .4)));
+  const c = [0, 1, 2].map(j => top.reduce((s, p) => s + p[j], 0) / top.length);
+  const old = scleraCache[i];
+  scleraCache[i] = old ? old.map((v, j) => v * .7 + c[j] * .3) : c;
+}
+
+function moveEye(i, eye, f, W, H, amount, dirScreen, frame) {
+  const P = eye.contour.map(k => [f[k].x * W, f[k].y * H]);
+  const cx = f[eye.center].x * W, cy = f[eye.center].y * H;
+  const r = eye.ring.reduce((s, k) => s + Math.hypot(f[k].x * W - cx, f[k].y * H - cy), 0) / eye.ring.length * 1.08;
+  if (frame % 8 === 0 || !scleraCache[i]) sampleSclera(i, P, cx, cy, r);
+  if (!scleraCache[i] || amount <= 0.001) return;
+
+  // Écran en miroir : la droite de l'écran correspond à la gauche de l'image
+  const dirImg = mirror ? -dirScreen : dirScreen;
+  const dx = amount * dirImg * r * 1.05, dy = -amount * r * 0.55;
+  const [R, G, B] = scleraCache[i].map(Math.round);
+  const ys = P.map(p => p[1]), top = Math.min(...ys), bot = Math.max(...ys);
+
+  vctx.save();
+  vctx.beginPath(); P.forEach(([x, y], k) => k ? vctx.lineTo(x, y) : vctx.moveTo(x, y)); vctx.closePath(); vctx.clip();
+  // 1) on « efface » l'iris en peignant le blanc de l'œil (plus sombre sous la paupière du haut)
+  const g = vctx.createLinearGradient(0, top, 0, bot);
+  g.addColorStop(0, `rgb(${R*.72|0},${G*.72|0},${B*.72|0})`);
+  g.addColorStop(.45, `rgb(${R},${G},${B})`);
+  g.addColorStop(1, `rgb(${R*.9|0},${G*.9|0},${B*.9|0})`);
+  vctx.fillStyle = g; vctx.fillRect(0, 0, W, H);
+  // 2) on redessine l'iris d'origine, décalé vers le haut et sur le côté
+  vctx.beginPath(); vctx.arc(cx + dx, cy + dy, r, 0, Math.PI * 2); vctx.clip();
+  vctx.drawImage(video, dx, dy, W, H);
+  vctx.restore();
+}
+
+/* ===================== Boucle d'affichage ===================== */
+let frame = 0, lastFace = null, lastVT = -1;
+function loop() {
+  requestAnimationFrame(loop);
+  if (!live || video.readyState < 2) return;
+  const W = video.videoWidth, H = video.videoHeight;
+  if (view.width !== W || view.height !== H) { view.width = W; view.height = H; }
+  vctx.drawImage(video, 0, 0, W, H);
+  const now = performance.now();
+  if (landmarker && facing === 'user') {
+    if (video.currentTime !== lastVT) {
+      lastVT = video.currentTime;
+      try { lastFace = landmarker.detectForVideo(video, now).faceLandmarks?.[0] || null; } catch { lastFace = null; }
+    }
+    const amount = glanceAmount(now);
+    if (lastFace && lastFace.length > 477) {
+      EYES.forEach((eye, i) => moveEye(i, eye, lastFace, W, H, amount, glance ? glance.dir : 1, frame));
+    }
+  }
+  frame++;
+}
+requestAnimationFrame(loop);
+
+/* ===================== Photo & galerie ===================== */
+const photos = []; let current = -1, busy = false;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+$('shutter').onclick = async () => {
+  if (!live || busy) return; busy = true;
+  for (let s = timer; s > 0; s--) { $('count').style.display = 'flex'; $('count').textContent = s; await sleep(1000); }
+  $('count').style.display = 'none';
+  const fl = $('flash');
+  if (screenLight) { fl.style.transition = 'none'; fl.style.opacity = '1'; await sleep(250); }
+  const c = document.createElement('canvas'); c.width = view.width; c.height = view.height;
+  const x = c.getContext('2d'); x.filter = filter;
+  if (mirror) { x.translate(c.width, 0); x.scale(-1, 1); }
+  x.drawImage(view, 0, 0);
+  fl.style.transition = 'opacity .35s'; fl.style.opacity = screenLight ? '0' : '.85';
+  if (!screenLight) setTimeout(() => fl.style.opacity = '0', 60);
+  c.toBlob(blob => {
+    const url = URL.createObjectURL(blob); photos.push({ blob, url });
+    $('thumb').style.backgroundImage = `url(${url})`;
+  }, 'image/jpeg', .92);
+  busy = false;
+};
+function renderStrip() {
+  $('strip').innerHTML = '';
+  photos.forEach((p, i) => {
+    const im = document.createElement('img'); im.src = p.url; im.className = i === current ? 'sel' : '';
+    im.onclick = () => openSheet(i); $('strip').appendChild(im);
+  });
+  $('sheetCount').textContent = photos.length ? `${current + 1} / ${photos.length}` : '';
+}
+function openSheet(i) {
+  if (!photos.length) return;
+  current = i; $('bigImg').src = photos[i].url; $('msg').textContent = ''; renderStrip(); $('sheet').classList.add('open');
+}
+$('thumb').onclick = () => openSheet(photos.length - 1);
+$('closeSheet').onclick = () => $('sheet').classList.remove('open');
+$('btnDelete').onclick = () => {
+  URL.revokeObjectURL(photos[current].url); photos.splice(current, 1);
+  const last = photos[photos.length - 1]; $('thumb').style.backgroundImage = last ? `url(${last.url})` : '';
+  if (!photos.length) { $('sheet').classList.remove('open'); return; }
+  openSheet(Math.min(current, photos.length - 1));
+};
+$('btnSave').onclick = () => {
+  const p = photos[current]; if (!p) return;
+  const a = document.createElement('a'); a.href = p.url;
+  a.download = `photo-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.jpg`;
+  document.body.appendChild(a); a.click(); a.remove();
+  $('msg').textContent = 'Si rien ne se passe : appui long sur la photo → « Enregistrer l’image ».';
+};
+
+</script>
+</body>
+</html>
